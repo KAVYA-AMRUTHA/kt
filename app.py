@@ -38,7 +38,7 @@ logger = logging.getLogger("rag-kt-agent")
 # Constants / configuration (no hardcoded secrets)
 # --------------------------------------------------------------------------
 DEFAULT_CHAT_MODEL = "gemini-flash-latest"
-models/gemini-embedding-2
+DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-2"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 TOP_K = 4
