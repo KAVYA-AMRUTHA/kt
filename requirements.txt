@@ -1,0 +1,12 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+langchain-core==1.5.5
+langchain-community==0.4.2
+langchain-text-splitters==1.1.2
+langchain-google-genai==4.3.4
+faiss-cpu==1.15.0
+pypdf==6.16.1
+pydantic==2.13.4
+python-multipart==0.0.32
+langserve[all]==0.3.3
+sse-starlette==1.8.2
