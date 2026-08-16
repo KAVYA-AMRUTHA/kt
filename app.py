@@ -27,6 +27,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -287,10 +288,18 @@ def delete_doc(doc_id: str):
 
 
 # --------------------------------------------------------------------------
-# LangServe playground - a browser-based form for asking questions at
-# /agent/playground/. Upload a PDF via POST /upload first (playground forms
-# can't handle file uploads), then paste the returned doc_id here.
+# Browser playground
+#
+# IMPORTANT:
+# LangServe's built-in playground accepts JSON inputs and cannot directly
+# upload a PDF with a file picker. Therefore /agent/playground below is a
+# small custom browser UI that uploads the PDF first, receives the generated
+# doc_id, and then asks questions against that document.
+#
+# The native LangServe playground is still available at:
+# /agent/api/playground/
 # --------------------------------------------------------------------------
+
 from langchain_core.runnables import RunnableLambda  # noqa: E402
 from langserve import add_routes  # noqa: E402
 
@@ -301,12 +310,11 @@ class AskPlaygroundInput(BaseModel):
 
 
 def _playground_ask(payload) -> AskResponse:
-    # langserve may hand this function either a validated pydantic instance
-    # or a plain dict depending on the call path (invoke vs playground UI),
-    # so normalise both to AskPlaygroundInput before use.
     if isinstance(payload, dict):
         payload = AskPlaygroundInput(**payload)
-    return ask_question(AskRequest(doc_id=payload.doc_id, question=payload.question))
+    return ask_question(
+        AskRequest(doc_id=payload.doc_id, question=payload.question)
+    )
 
 
 rag_qa_chain = RunnableLambda(_playground_ask).with_types(
@@ -314,9 +322,298 @@ rag_qa_chain = RunnableLambda(_playground_ask).with_types(
     output_type=AskResponse,
 )
 
-# Exposes /agent/invoke, /agent/stream, /agent/batch, and the browser UI at
-# /agent/playground/
-add_routes(app, rag_qa_chain, path="/agent")
+# Keep the native LangServe API/playground available without taking over
+# /agent/playground.
+add_routes(app, rag_qa_chain, path="/agent/api")
+
+
+PLAYGROUND_HTML = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Transfer Agent</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: Inter, Arial, sans-serif;
+            background: #f5f7fb;
+            color: #172033;
+        }
+        .wrap {
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 20px 50px;
+        }
+        .hero {
+            background: white;
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 8px 30px rgba(20, 35, 70, .08);
+            margin-bottom: 20px;
+        }
+        h1 { margin: 0 0 8px; font-size: 30px; }
+        .subtitle { color: #667085; margin: 0; }
+        .card {
+            background: white;
+            border-radius: 18px;
+            padding: 24px;
+            margin-top: 18px;
+            box-shadow: 0 8px 30px rgba(20, 35, 70, .07);
+        }
+        label {
+            display: block;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        input[type=file], textarea {
+            width: 100%;
+            border: 1px solid #d0d5dd;
+            border-radius: 12px;
+            padding: 13px;
+            font-size: 15px;
+            background: #fff;
+        }
+        textarea {
+            min-height: 110px;
+            resize: vertical;
+        }
+        button {
+            border: 0;
+            border-radius: 12px;
+            padding: 13px 20px;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-top: 12px;
+        }
+        .upload { background: #172033; color: white; }
+        .ask { background: #2563eb; color: white; }
+        button:disabled { opacity: .55; cursor: not-allowed; }
+        .status {
+            margin-top: 14px;
+            padding: 12px;
+            border-radius: 10px;
+            background: #f2f4f7;
+            white-space: pre-wrap;
+        }
+        .success { background: #ecfdf3; color: #027a48; }
+        .error { background: #fef3f2; color: #b42318; }
+        .answer {
+            margin-top: 20px;
+            padding: 18px;
+            border-radius: 12px;
+            background: #f8fafc;
+            line-height: 1.65;
+            white-space: pre-wrap;
+        }
+        .sources {
+            margin-top: 15px;
+            font-size: 13px;
+            color: #667085;
+        }
+        .source {
+            margin-top: 8px;
+            padding: 10px;
+            background: #f2f4f7;
+            border-radius: 8px;
+        }
+        .docid {
+            font-family: monospace;
+            word-break: break-all;
+        }
+        .hint {
+            font-size: 13px;
+            color: #667085;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="hero">
+        <h1>📚 Knowledge Transfer Agent</h1>
+        <p class="subtitle">
+            Upload a PDF, let the agent index it, then ask questions using
+            retrieval-augmented generation.
+        </p>
+    </div>
+
+    <div class="card">
+        <label for="pdf">1. Upload Knowledge Transfer PDF</label>
+        <input id="pdf" type="file" accept=".pdf,application/pdf">
+        <button id="uploadBtn" class="upload" onclick="uploadPDF()">
+            Upload & Index PDF
+        </button>
+        <div id="uploadStatus" class="status">
+            No document uploaded yet.
+        </div>
+    </div>
+
+    <div class="card">
+        <label for="question">2. Ask a Question</label>
+        <textarea id="question"
+            placeholder="Example: What are the seven steps in the PDF processing pipeline?"></textarea>
+        <button id="askBtn" class="ask" onclick="askQuestion()" disabled>
+            Ask Agent
+        </button>
+        <div class="hint">
+            Upload a PDF first. The document ID is generated automatically.
+        </div>
+
+        <div id="answer"></div>
+        <div id="sources"></div>
+    </div>
+</div>
+
+<script>
+let currentDocId = null;
+
+function setStatus(message, type="") {
+    const el = document.getElementById("uploadStatus");
+    el.className = "status " + type;
+    el.textContent = message;
+}
+
+async function uploadPDF() {
+    const input = document.getElementById("pdf");
+    const btn = document.getElementById("uploadBtn");
+
+    if (!input.files.length) {
+        setStatus("Please choose a PDF first.", "error");
+        return;
+    }
+
+    const file = input.files[0];
+
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+        setStatus("Only PDF files are supported.", "error");
+        return;
+    }
+
+    btn.disabled = true;
+    setStatus("Uploading and indexing the PDF... This may take a little while.");
+
+    try {
+        const form = new FormData();
+        form.append("file", file);
+
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: form
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || "Upload failed.");
+        }
+
+        currentDocId = data.doc_id;
+
+        setStatus(
+            "PDF indexed successfully.\n\n" +
+            "File: " + data.filename + "\n" +
+            "Pages: " + data.pages_indexed + "\n" +
+            "Chunks: " + data.chunks_indexed + "\n" +
+            "Document ID: " + data.doc_id,
+            "success"
+        );
+
+        document.getElementById("askBtn").disabled = false;
+    } catch (err) {
+        currentDocId = null;
+        document.getElementById("askBtn").disabled = true;
+        setStatus("Upload error:\n" + err.message, "error");
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function askQuestion() {
+    const question = document.getElementById("question").value.trim();
+    const btn = document.getElementById("askBtn");
+    const answer = document.getElementById("answer");
+    const sources = document.getElementById("sources");
+
+    if (!currentDocId) {
+        answer.innerHTML = '<div class="answer">Please upload a PDF first.</div>';
+        return;
+    }
+
+    if (!question) {
+        answer.innerHTML = '<div class="answer">Please enter a question.</div>';
+        return;
+    }
+
+    btn.disabled = true;
+    answer.innerHTML = '<div class="answer">Thinking...</div>';
+    sources.innerHTML = "";
+
+    try {
+        const response = await fetch("/ask", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                doc_id: currentDocId,
+                question: question
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || "Question failed.");
+        }
+
+        answer.innerHTML =
+            '<div class="answer"><strong>Answer</strong><br><br>' +
+            escapeHtml(data.answer) +
+            '</div>';
+
+        if (data.sources && data.sources.length) {
+            let html = '<div class="sources"><strong>Retrieved sources</strong>';
+            for (const source of data.sources) {
+                html +=
+                    '<div class="source"><strong>Page ' +
+                    escapeHtml(String(source.page)) +
+                    ':</strong> ' +
+                    escapeHtml(source.snippet) +
+                    '</div>';
+            }
+            html += '</div>';
+            sources.innerHTML = html;
+        }
+    } catch (err) {
+        answer.innerHTML =
+            '<div class="answer error">' +
+            escapeHtml("Error: " + err.message) +
+            '</div>';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function escapeHtml(value) {
+    return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/agent/playground", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/agent/playground/", response_class=HTMLResponse, include_in_schema=False)
+def custom_playground():
+    return HTMLResponse(content=PLAYGROUND_HTML)
 
 
 if __name__ == "__main__":
